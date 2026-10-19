@@ -16,7 +16,7 @@ class AudioRecordingService {
   // We use one common timeline for both audio sources.
   final Stopwatch _clock = Stopwatch();
 
-  final List<_AudioChunk> _localChunks = [];
+final List<Uint8List> _localChunks = [];
   final List<_AudioChunk> _remoteChunks = [];
 
   bool _recording = false;
@@ -67,15 +67,30 @@ class AudioRecordingService {
   }
 
   void addLocalAudio(Uint8List pcm) {
-    if (!_recording || pcm.isEmpty) return;
+  if (!_recording || pcm.isEmpty) return;
 
-    _localChunks.add(
-      _AudioChunk(
-        timeMicroseconds: _clock.elapsedMicroseconds,
-        pcm: Uint8List.fromList(pcm),
-      ),
-    );
+  _localChunks.add(Uint8List.fromList(pcm));
+}
+
+void _appendLocalChunks(Int16List destination) {
+  var position = 0;
+
+  for (final chunk in _localChunks) {
+    final samples = ByteData.sublistView(chunk);
+    final sampleCount = chunk.length ~/ bytesPerSample;
+
+    for (var i = 0; i < sampleCount; i++) {
+      if (position >= destination.length) return;
+
+      destination[position] = samples.getInt16(
+        i * bytesPerSample,
+        Endian.little,
+      );
+
+      position++;
+    }
   }
+}
 
   void addRemoteAudio(Uint8List pcm) {
     if (!_recording || pcm.isEmpty) return;
@@ -100,16 +115,24 @@ class AudioRecordingService {
     final durationMicroseconds = _clock.elapsedMicroseconds;
 
     // Convert elapsed time into stereo sample frames.
-    final totalFrames = max(
-      1,
-      (durationMicroseconds * sampleRate / 1000000).ceil(),
-    );
+    final localFrames = _localChunks.fold<int>(
+  0,
+  (sum, chunk) => sum + chunk.length ~/ bytesPerSample,
+);
+
+final totalFrames = max(
+  1,
+  max(
+    localFrames,
+    (durationMicroseconds * sampleRate / 1000000).ceil(),
+  ),
+);
 
     final left = Int16List(totalFrames);
     final right = Int16List(totalFrames);
 
-    _mixChunksIntoChannel(_localChunks, left);
-    _mixChunksIntoChannel(_remoteChunks, right);
+    _appendLocalChunks(left);
+      _mixChunksIntoChannel(_remoteChunks, right);    
 
     final output = Uint8List(44 + totalFrames * bytesPerFrame);
     final header = ByteData.sublistView(output);
