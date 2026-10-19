@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioDeviceInfo
+import android.os.Build
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -385,6 +387,10 @@ MethodChannel(
 
         audioRecord?.startRecording()
 
+        // Audio capture can change the communication route on some devices.
+        // Re-select the speaker after the microphone starts.
+        enableLoudspeaker()
+
         // ========================================================
         // RECORDING THREAD
         // ========================================================
@@ -617,42 +623,58 @@ MethodChannel(
     }
 
     // ============================================================
+    // LOUDSPEAKER ROUTING
+    // ============================================================
+
+    private fun enableLoudspeaker() {
+        val audioManager =
+            getSystemService(AUDIO_SERVICE) as AudioManager
+
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val speaker = audioManager.availableCommunicationDevices
+                .firstOrNull {
+                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                }
+
+            if (speaker != null) {
+                val selected = audioManager.setCommunicationDevice(speaker)
+                Log.i(
+                    "AudioRouting",
+                    "Built-in speaker selected: $selected"
+                )
+            } else {
+                Log.w(
+                    "AudioRouting",
+                    "Built-in speaker unavailable for communication routing"
+                )
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = true
+
+            Log.i(
+                "AudioRouting",
+                "Legacy speakerphone routing enabled"
+            )
+        }
+    }
+
+    // ============================================================
     // INITIALIZE AUDIO PLAYBACK
     // ============================================================
 
     private fun initializeAudioTrack() {
+        // Apply routing on every initialize request, even if the
+        // AudioTrack already exists.
+        enableLoudspeaker()
 
         if (audioTrack != null) {
             return
         }
 
         val sampleRate = 48000
-
-        // ========================================================
-        // AUDIO ROUTING
-        // ========================================================
-
-        val audioManager =
-            getSystemService(
-                AUDIO_SERVICE
-            ) as AudioManager
-
-        // Tell Android that this is a voice communication session.
-        audioManager.mode =
-            AudioManager.MODE_IN_COMMUNICATION
-
-        // Explicitly disable the loudspeaker.
-        //
-        // This is important for the OnePlus 5 / Android 10,
-        // where Android otherwise selected the loudspeaker.
-
-        @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = false
-
-        Log.i(
-            "AudioRouting",
-            "Communication mode enabled, speakerphone OFF"
-        )
 
         // ========================================================
         // CREATE AUDIOTRACK
@@ -696,6 +718,9 @@ MethodChannel(
 
         audioTrack?.play()
 
+        // Some Android devices re-evaluate the route when playback begins.
+        enableLoudspeaker()
+
         Log.i(
             "AudioPlayback",
             "AudioTrack initialized"
@@ -727,6 +752,13 @@ MethodChannel(
             getSystemService(
                 AUDIO_SERVICE
             ) as AudioManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            audioManager.clearCommunicationDevice()
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = false
+        }
 
         audioManager.mode =
             AudioManager.MODE_NORMAL

@@ -167,15 +167,7 @@ Future<void> sendMicrophoneOverUdp() async {
   }
 
   try {
-    // ==========================================
-    // 1. CONFIGURE AUDIO DEGRADATIONS
-    // ==========================================
-
     
-
-    // ==========================================
-    // 2. CAPTURE AND PROCESS MICROPHONE AUDIO
-    // ==========================================
 
     audioCaptureService.onAudioData = (audioData) {
       impairmentService.process(

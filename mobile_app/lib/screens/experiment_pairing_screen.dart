@@ -1,155 +1,91 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
-
 import '../models/discovered_experiment.dart';
-
 import '../models/experiment_config.dart';
-
 import '../services/experiment_network_service.dart';
-
 import '../services/audio/experiment_audio_service.dart';
-
 import 'evaluation_screen.dart';
-
 import '../data/conversation_scenarios.dart';
-
 import '../models/conversation_scenario.dart';
-
 import '../services/csv_report_service.dart';
-
 import '../services/csv_storage_service.dart';
-
 class ExperimentPairingScreen extends StatefulWidget {
   final ExperimentConfig? experiment;
-
   const ExperimentPairingScreen({super.key, this.experiment});
-
   @override
   State<ExperimentPairingScreen> createState() =>
       _ExperimentPairingScreenState();
 }
-
 class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
   final network = ExperimentNetworkService();
-
   late final TextEditingController nameController;
-
   late final StreamSubscription<Map<String, dynamic>> messageSubscription;
-
   final CsvReportService csvReportService = CsvReportService();
-
   final CsvStorageService csvStorageService = CsvStorageService();
-
   bool savingCsv = false;
-
   String? savedCsvLocation;
-
   String? csvError;
-
   Timer? refreshTimer;
-
   Timer? syncTimer;
-
   final ExperimentAudioService audio = ExperimentAudioService();
-
   bool audioStarting = false;
-
   bool localAudioReady = false;
   bool remoteAudioReady = false;
   bool audioStartCommandSent = false;
   bool audioStartAcknowledged = false;
-
   String? audioError;
-
   List<DiscoveredExperiment> experiments = [];
-
   ExperimentConfig? activeExperiment;
-
   bool busy = false;
-
   bool hosting = false;
-
   bool searching = false;
-
   bool joined = false;
-
   bool localReady = false;
-
   bool remoteReady = false;
-
   bool configAcknowledged = false;
-
   bool startRequested = false;
-
   bool conversationStarted = false;
-
   int currentTestIndex = 0;
-
   String phase = 'pairing'; // pairing, conversation, evaluation, complete
-
   bool localEvaluationDone = false;
-
   bool remoteEvaluationDone = false;
-
   bool stopAcknowledged = false;
-
   bool nextStartPending = false;
-
   int? pendingNextIndex;
-
   final Map<int, EvaluationResult> localResults = {};
-
   String status = 'Choose an option to begin.';
-
   bool get isAdmin => widget.experiment != null;
-
   Future<void> startExperimentAudio() async {
     if (!mounted || audioStarting || audio.isRunning) {
       return;
     }
-
     final experiment = activeExperiment;
-
     final peerIp = network.connectedHost;
-
     if (experiment == null || experiment.tests.isEmpty || peerIp == null) {
       setState(() {
         audioError = 'Missing experiment or participant connection.';
       });
-
       return;
     }
-
     setState(() {
       audioStarting = true;
-
       audioError = null;
     });
-
     try {
       final currentTest = experiment.tests[currentTestIndex];
-
       await audio.startConversation(
         peerIp: peerIp,
-
         condition: currentTest.condition,
-
         experimentId: experiment.id,
-
         testNumber: currentTestIndex + 1,
-
         participantRole: hosting ? 'A' : 'B',
       );
-
       if (!mounted) return;
-
       setState(() {
         status = 'Audio conversation is active.';
       });
     } catch (e) {
       if (!mounted) return;
-
       setState(() {
         audioError = 'Could not start audio: $e';
       });
@@ -161,14 +97,12 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       }
     }
   }
-
   void resetAudioReadiness() {
     localAudioReady = false;
     remoteAudioReady = false;
     audioStartCommandSent = false;
     audioStartAcknowledged = false;
   }
-
   void requestAudioStart() {
     final experiment = activeExperiment;
     if (experiment == null ||
@@ -178,13 +112,11 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         audio.isRunning) {
       return;
     }
-
     setState(() {
       localAudioReady = true;
       audioError = null;
       status = 'Waiting for the other participant...';
     });
-
     network.send({
       'type': 'audio_ready',
       'experimentId': experiment.id,
@@ -192,7 +124,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
     });
     tryCoordinateAudioStart();
   }
-
   void tryCoordinateAudioStart() {
     final experiment = activeExperiment;
     if (!hosting ||
@@ -203,7 +134,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         audioStartCommandSent) {
       return;
     }
-
     setState(() {
       audioStartCommandSent = true;
       status = 'Both participants ready. Starting audio...';
@@ -214,47 +144,33 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       'testIndex': currentTestIndex,
     });
   }
-
   Future<void> saveCsvReport() async {
     final experiment = activeExperiment;
-
     if (savingCsv || experiment == null) return;
-
     if (localResults.isEmpty) {
       setState(() {
         csvError = 'No evaluation results available.';
       });
-
       return;
     }
-
     setState(() {
       savingCsv = true;
-
       csvError = null;
     });
-
     try {
       final csvPath = await csvReportService.generateReport(
         experiment: experiment,
-
         results: localResults,
-
         participantRole: hosting ? 'A' : 'B',
       );
-
       final publishedLocation = await csvStorageService.publishCsv(csvPath);
-
       if (!mounted) return;
-
       setState(() {
         savedCsvLocation = publishedLocation;
-
         status = 'CSV results saved successfully.';
       });
     } catch (error) {
       if (!mounted) return;
-
       setState(() {
         csvError = 'Could not save CSV: $error';
       });
@@ -264,93 +180,65 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       }
     }
   }
-
   @override
   void initState() {
     super.initState();
-
     activeExperiment = widget.experiment;
-
     nameController = TextEditingController(
       text: widget.experiment?.name ?? 'Speech Quality Experiment',
     );
-
     messageSubscription = network.messages.listen(handleMessage);
-
     // Retransmit important state over UDP.
-
     syncTimer = Timer.periodic(
       const Duration(seconds: 1),
-
       (_) => synchronize(),
     );
   }
-
   void handleMessage(Map<String, dynamic> message) {
     if (!mounted) return;
-
     final type = message['type'];
-
     final experiment = activeExperiment;
-
     if (type == 'participant_joined' && hosting) {
       setState(() {
         joined = true;
-
         status = 'Participant connected!';
       });
-
       synchronize();
-
       return;
     }
-
     if (type == 'experiment_config' && !hosting) {
       try {
         final received = experimentFromMap(
           Map<String, dynamic>.from(message['experiment'] as Map),
         );
-
         if (experiment != null && experiment.id != received.id) return;
-
         setState(() {
           activeExperiment = received;
-
           joined = true;
-
           status = 'Experiment configuration received.';
         });
-
         network.send({'type': 'config_ack', 'experimentId': received.id});
       } catch (e) {
         setState(() => status = 'Invalid experiment configuration: $e');
       }
-
       return;
     }
-
     if (type == 'config_ack' && hosting) {
       if (message['experimentId'] == experiment?.id) {
         setState(() {
           configAcknowledged = true;
-
           status = 'Experiment synchronized.';
         });
       }
-
       return;
     }
-
     if (experiment == null || message['experimentId'] != experiment.id) {
       return;
     }
-
     if (type == 'ready') {
       setState(() => remoteReady = message['ready'] == true);
-
       return;
     }
-
     if (type == 'audio_ready' &&
         phase == 'conversation' &&
         message['testIndex'] == currentTestIndex) {
@@ -360,7 +248,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       tryCoordinateAudioStart();
       return;
     }
-
     if (type == 'audio_start' &&
         !hosting &&
         phase == 'conversation' &&
@@ -377,7 +264,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       }
       return;
     }
-
     if (type == 'audio_start_ack' &&
         hosting &&
         phase == 'conversation' &&
@@ -391,174 +277,118 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       }
       return;
     }
-
     if (type == 'start_test' && !hosting) {
       final index = message['testIndex'];
-
       if (index is! int || index < 0 || index >= experiment.tests.length) {
         return;
       }
-
       // Duplicate command: acknowledge without resetting the active screen.
-
       if (phase == 'conversation' && currentTestIndex == index) {
         sendStartAck(index);
-
         return;
       }
-
       final initialStart = phase == 'pairing' && index == 0;
-
       final nextStart =
           phase == 'evaluation' &&
           localEvaluationDone &&
           index == currentTestIndex + 1;
-
       if (!initialStart && !nextStart) return;
-
       setState(() {
         currentTestIndex = index;
-
         resetAudioReadiness();
         phase = 'conversation';
-
         conversationStarted = true;
-
         localEvaluationDone = false;
-
         remoteEvaluationDone = false;
-
         audioError = null;
-
         status = 'SCT ${index + 1} started.';
       });
-
       sendStartAck(index);
-
       return;
     }
-
     if (type == 'start_ack' && hosting) {
       final index = message['testIndex'];
-
       if (index == 0 && startRequested && phase == 'pairing') {
         setState(() {
           resetAudioReadiness();
           phase = 'conversation';
-
           conversationStarted = true;
-
           status = 'Both phones started SCT 1.';
         });
       } else if (nextStartPending && index == pendingNextIndex) {
         setState(() {
           currentTestIndex = index as int;
-
           resetAudioReadiness();
           phase = 'conversation';
-
           nextStartPending = false;
-
           pendingNextIndex = null;
-
           localEvaluationDone = false;
-
           remoteEvaluationDone = false;
-
           stopAcknowledged = false;
-
           audioError = null;
-
           status = 'Both phones started SCT ${index + 1}.';
         });
       }
-
       return;
     }
-
     if (type == 'finish_test' && !hosting) {
       final index = message['testIndex'];
-
       if (index != currentTestIndex) return;
-
       if (phase == 'conversation') {
         enterEvaluation();
       }
-
       if (phase == 'evaluation') {
         network.send({
           'type': 'finish_ack',
-
           'experimentId': experiment.id,
-
           'testIndex': index,
         });
       }
-
       return;
     }
-
     if (type == 'finish_ack' &&
         hosting &&
         message['testIndex'] == currentTestIndex) {
       setState(() => stopAcknowledged = true);
-
       return;
     }
-
     if (type == 'evaluation_done' && message['testIndex'] == currentTestIndex) {
       setState(() => remoteEvaluationDone = true);
-
       return;
     }
-
     if (type == 'experiment_complete' &&
         !hosting &&
         phase == 'evaluation' &&
         localEvaluationDone) {
       setState(() {
         phase = 'complete';
-
         status = 'Experiment complete.';
       });
-
       network.send({'type': 'complete_ack', 'experimentId': experiment.id});
-
       return;
     }
-
     if (type == 'complete_ack' && hosting) {
       setState(() => completionAcknowledged = true);
     }
   }
-
   bool completionAcknowledged = false;
-
   void sendStartAck(int index) {
     network.send({
       'type': 'start_ack',
-
       'experimentId': activeExperiment!.id,
-
       'testIndex': index,
     });
   }
-
   void synchronize() {
     if (!mounted || !joined || !network.isConnected) return;
-
     final experiment = activeExperiment;
-
     if (hosting && experiment != null && !configAcknowledged) {
       network.send({
         'type': 'experiment_config',
-
         'experiment': experimentToMap(experiment),
       });
     }
-
     if (experiment == null) return;
-
     if (phase == 'conversation' && localAudioReady) {
       network.send({
         'type': 'audio_ready',
@@ -566,7 +396,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         'testIndex': currentTestIndex,
       });
     }
-
     if (hosting &&
         phase == 'conversation' &&
         audioStartCommandSent &&
@@ -577,101 +406,104 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         'testIndex': currentTestIndex,
       });
     }
-
     if (localReady && phase == 'pairing') {
       network.send({
         'type': 'ready',
-
         'experimentId': experiment.id,
-
         'ready': true,
       });
     }
-
     if (hosting && startRequested && phase == 'pairing') {
       network.send({
         'type': 'start_test',
-
         'experimentId': experiment.id,
-
         'testIndex': 0,
       });
     }
-
     if (hosting && phase == 'evaluation' && !stopAcknowledged) {
       network.send({
         'type': 'finish_test',
-
         'experimentId': experiment.id,
-
         'testIndex': currentTestIndex,
       });
     }
-
     if (localEvaluationDone && phase == 'evaluation') {
       network.send({
         'type': 'evaluation_done',
-
         'experimentId': experiment.id,
-
         'testIndex': currentTestIndex,
       });
     }
-
     if (hosting && nextStartPending && pendingNextIndex != null) {
       network.send({
         'type': 'start_test',
-
         'experimentId': experiment.id,
-
         'testIndex': pendingNextIndex,
       });
     }
-
     if (hosting && phase == 'complete' && !completionAcknowledged) {
       network.send({
         'type': 'experiment_complete',
-
         'experimentId': experiment.id,
       });
     }
   }
+  Future<void> confirmFinishConversation() async {
+    if (!mounted || phase != 'conversation' || !audio.isRunning) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('End conversation?'),
+        content: const Text(
+          'Are you sure you want to finish this conversation? '
+          'Both participants will move to the evaluation.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('End conversation'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted || confirmed != true || phase != 'conversation') return;
+    await enterEvaluation();
+  }
+
+  void returnToHome() {
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
 
   Future<void> enterEvaluation() async {
     if (phase != 'conversation') return;
-
     setState(() {
       phase = 'evaluation';
-
       status = 'Conversation finished. Please evaluate it.';
     });
-
     try {
       await audio.stopConversation();
     } catch (e) {
       if (mounted) setState(() => status = 'Audio stop error: $e');
     }
-
     synchronize();
   }
-
   void submitEvaluation(EvaluationResult result) {
     if (phase != 'evaluation' || localEvaluationDone) return;
-
     setState(() {
       localResults[currentTestIndex] = result;
-
       localEvaluationDone = true;
-
       status = 'Evaluation submitted. Waiting for partner.';
     });
-
     synchronize();
   }
-
   void advanceExperiment() {
     final experiment = activeExperiment;
-
     if (!hosting ||
         phase != 'evaluation' ||
         experiment == null ||
@@ -680,41 +512,30 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         !stopAcknowledged ||
         nextStartPending)
       return;
-
     if (currentTestIndex + 1 == experiment.tests.length) {
       setState(() {
         phase = 'complete';
-
         status = 'Experiment complete.';
       });
     } else {
       setState(() {
         pendingNextIndex = currentTestIndex + 1;
-
         nextStartPending = true;
-
         status = 'Starting next SCT on both phones...';
       });
     }
-
     synchronize();
   }
-
   void setReady() {
     if (activeExperiment == null) return;
-
     setState(() {
       localReady = true;
-
       status = 'You are ready.';
     });
-
     synchronize();
   }
-
   void startExperiment() {
     final experiment = activeExperiment;
-
     if (!hosting ||
         !localReady ||
         !remoteReady ||
@@ -723,52 +544,37 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         experiment.tests.isEmpty) {
       return;
     }
-
     setState(() {
       startRequested = true;
-
       status = 'Starting SCT 1 on both phones...';
     });
-
     synchronize();
   }
-
   Future<void> host() async {
     if (busy || hosting || searching) return;
-
     setState(() {
       busy = true;
-
       status = 'Creating experiment...';
     });
-
     try {
       await network.startHosting(
         nameController.text.trim().isEmpty
             ? 'Speech Quality Experiment'
             : nameController.text.trim(),
       );
-
       if (!mounted) return;
-
       setState(() {
         hosting = true;
-
         status = 'Waiting for participant...';
       });
-
       refreshTimer?.cancel();
-
       refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted || joined) return;
-
         if (network.isConnected) {
           setState(() {
             joined = true;
-
             status = 'Participant connected!';
           });
-
           synchronize();
         }
       });
@@ -780,30 +586,20 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       if (mounted) setState(() => busy = false);
     }
   }
-
   Future<void> search() async {
     if (busy || hosting || searching) return;
-
     setState(() {
       busy = true;
-
       status = 'Searching for experiments...';
     });
-
     try {
       await network.startDiscovery();
-
       if (!mounted) return;
-
       setState(() => searching = true);
-
       await refreshExperiments();
-
       refreshTimer?.cancel();
-
       refreshTimer = Timer.periodic(
         const Duration(seconds: 2),
-
         (_) => refreshExperiments(),
       );
     } catch (e) {
@@ -814,13 +610,10 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       if (mounted) setState(() => busy = false);
     }
   }
-
   Future<void> refreshExperiments() async {
     try {
       final found = await network.getExperiments();
-
       if (!mounted || !searching || joined) return;
-
       setState(() => experiments = found);
     } catch (e) {
       if (mounted) {
@@ -828,90 +621,66 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       }
     }
   }
-
   Future<void> join(DiscoveredExperiment experiment) async {
     if (busy) return;
-
     refreshTimer?.cancel();
-
     setState(() {
       busy = true;
-
       status = 'Connecting to ${experiment.name}...';
     });
-
     try {
       final accepted = await network.join(experiment);
-
       if (!mounted) return;
-
       if (accepted) {
         setState(() {
           joined = true;
-
           searching = false;
-
           status = 'Connected. Receiving experiment...';
         });
-
         await network.stopDiscovery();
-
         // Request the configuration immediately.
-
         network.send({'type': 'request_config'});
       } else {
         setState(() {
           status = 'Host did not respond. Try again.';
         });
-
         resumeSearch();
       }
     } catch (e) {
       if (mounted) {
         setState(() => status = 'Join failed: $e');
-
         resumeSearch();
       }
     } finally {
       if (mounted) setState(() => busy = false);
     }
   }
-
   void resumeSearch() {
     if (!mounted || !searching) return;
-
     refreshTimer?.cancel();
-
     refreshTimer = Timer.periodic(
       const Duration(seconds: 2),
-
       (_) => refreshExperiments(),
     );
   }
-
   @override
   void dispose() {
     refreshTimer?.cancel();
-
     syncTimer?.cancel();
-
     messageSubscription.cancel();
-
     nameController.dispose();
-
     network.dispose();
-
     audio.dispose();
-
     super.dispose();
   }
-
   @override
   Widget build(BuildContext context) {
     final experiment = activeExperiment;
-
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
       appBar: AppBar(
+        automaticallyImplyLeading: false,
         title: Text(
           phase == 'evaluation'
               ? 'SCT Evaluation'
@@ -924,14 +693,12 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
               : 'Experiment Pairing',
         ),
       ),
-
       body: SafeArea(
         child:
             phase == 'evaluation' && experiment != null
                 ? buildEvaluation(experiment)
                 : ListView(
                   padding: const EdgeInsets.all(20),
-
                   children: [
                     if (phase == 'complete')
                       buildComplete()
@@ -941,26 +708,20 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
                       buildWaitingRoom()
                     else
                       buildPairing(),
-
                     const SizedBox(height: 20),
-
                     if (busy) const Center(child: CircularProgressIndicator()),
-
                     const SizedBox(height: 12),
-
                     Text(
                       status,
-
                       textAlign: TextAlign.center,
-
                       style: const TextStyle(color: Colors.grey),
                     ),
                   ],
                 ),
       ),
+    ),
     );
   }
-
   Widget _statusTile({
     required IconData icon,
     required String title,
@@ -1006,12 +767,10 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       ),
     );
   }
-
   Widget buildPairing() {
     final scheme = Theme.of(context).colorScheme;
     final experiment = activeExperiment;
     final isHostScreen = isAdmin;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1217,12 +976,10 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       ],
     );
   }
-
   Widget buildWaitingRoom() {
     final experiment = activeExperiment;
     final scheme = Theme.of(context).colorScheme;
     final bothReady = localReady && remoteReady;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1367,111 +1124,75 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       ],
     );
   }
-
   Widget buildConversation(ExperimentConfig experiment) {
     final test = experiment.tests[currentTestIndex];
-
     final ConversationScenario scenario = conversationScenarios.firstWhere(
       (item) => item.id == test.scenarioId,
     );
-
     final ConversationRole role = hosting ? scenario.caller : scenario.receiver;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-
       children: [
         const Icon(Icons.record_voice_over, size: 56, color: Colors.blue),
-
         const SizedBox(height: 12),
-
         Text(
           'Conversation Test ${currentTestIndex + 1} of ${experiment.tests.length}',
-
           textAlign: TextAlign.center,
-
           style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
         ),
-
         const SizedBox(height: 8),
-
         Text(
           scenario.title,
-
           textAlign: TextAlign.center,
-
           style: const TextStyle(fontSize: 20),
         ),
-
         const SizedBox(height: 16),
-
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
-
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-
               children: [
                 Text(
                   'Your role: ${role.roleName}',
-
                   style: const TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-
                 const SizedBox(height: 8),
-
                 Text('You are: ${role.participantName}'),
-
                 const SizedBox(height: 16),
-
                 const Text(
                   'Your task',
-
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                 ),
-
                 const SizedBox(height: 6),
-
                 Text(role.task),
               ],
             ),
           ),
         ),
-
         buildRoleSection('Conditions', role.conditions),
-
         buildRoleSection('Information to find', role.informationToFind),
-
         buildRoleSection('Information to provide', role.informationToProvide),
-
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
-
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-
               children: [
                 const Text(
                   'Discussion question',
-
                   style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                 ),
-
                 const SizedBox(height: 8),
-
                 Text(role.discussionQuestion),
               ],
             ),
           ),
         ),
-
         const SizedBox(height: 20),
-
         if (audio.isRunning)
           const Text(
             'Microphone and audio streaming active',
@@ -1505,60 +1226,43 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
             icon: const Icon(Icons.mic),
             label: const Text('Start Audio'),
           ),
-
         if (audioError != null) ...[
           const SizedBox(height: 12),
-
           Text(
             audioError!,
-
             textAlign: TextAlign.center,
-
             style: const TextStyle(color: Colors.red),
           ),
         ],
-
         if (hosting && audio.isRunning) ...[
           const SizedBox(height: 24),
-
           ElevatedButton.icon(
-            onPressed: enterEvaluation,
-
+            onPressed: confirmFinishConversation,
             icon: const Icon(Icons.stop_circle_outlined),
-
             label: const Text('Finish Conversation'),
           ),
         ],
       ],
     );
   }
-
   Widget buildRoleSection(String title, List<String> items) {
     if (items.isEmpty) return const SizedBox.shrink();
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-
           children: [
             Text(
               title,
-
               style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
             ),
-
             const SizedBox(height: 8),
-
             for (final item in items)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
-
                   children: [const Text('•  '), Expanded(child: Text(item))],
                 ),
               ),
@@ -1567,7 +1271,6 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
       ),
     );
   }
-
   Widget buildEvaluation(ExperimentConfig experiment) {
     if (!localEvaluationDone) {
       return EvaluationScreen(
@@ -1577,13 +1280,11 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
         onSubmitted: submitEvaluation,
       );
     }
-
     final theme = Theme.of(context);
     final bothDone = remoteEvaluationDone;
     final canAdvance = hosting && bothDone && stopAcknowledged;
     final isLastTest = currentTestIndex + 1 == experiment.tests.length;
     final progress = (currentTestIndex + 1) / experiment.tests.length;
-
     return LayoutBuilder(
       builder:
           (context, constraints) => SingleChildScrollView(
@@ -1773,70 +1474,57 @@ class _ExperimentPairingScreenState extends State<ExperimentPairingScreen> {
           ),
     );
   }
-
   Widget buildComplete() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
-
     children: [
       const Icon(Icons.verified, color: Colors.green, size: 72),
-
       const SizedBox(height: 16),
-
       const Text(
         'Experiment Complete',
-
         textAlign: TextAlign.center,
-
         style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
       ),
-
       const SizedBox(height: 12),
-
       Text(
         '${localResults.length} local evaluations collected.',
-
         textAlign: TextAlign.center,
       ),
-
       const SizedBox(height: 24),
-
       ElevatedButton.icon(
         onPressed: savingCsv ? null : saveCsvReport,
-
         icon:
             savingCsv
                 ? const SizedBox(
                   width: 20,
-
                   height: 20,
-
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
                 : const Icon(Icons.table_chart),
-
         label: Text(savingCsv ? 'Saving CSV...' : 'Save CSV Results'),
       ),
-
       if (savedCsvLocation != null) ...[
         const SizedBox(height: 16),
-
         const Icon(Icons.check_circle, color: Colors.green, size: 32),
-
         const Text(
           'CSV saved to Documents / SCT_Results',
-
           textAlign: TextAlign.center,
         ),
       ],
+        const SizedBox(height: 24),
+        OutlinedButton.icon(
+          onPressed: returnToHome,
+          icon: const Icon(Icons.home_outlined),
+          label: const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text('Return to Home'),
+          ),
+        ),
 
       if (csvError != null) ...[
         const SizedBox(height: 16),
-
         Text(
           csvError!,
-
           textAlign: TextAlign.center,
-
           style: const TextStyle(color: Colors.red),
         ),
       ],
