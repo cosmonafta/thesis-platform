@@ -1,9 +1,9 @@
-import 'dart:async';
+
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
 class AudioRecordingService {
@@ -12,12 +12,10 @@ class AudioRecordingService {
   static const int bytesPerSample = 2;
   static const int bytesPerFrame = channelCount * bytesPerSample;
 
-  // Keep pending audio in memory until the SCT finishes.
-  // We use one common timeline for both audio sources.
-  final Stopwatch _clock = Stopwatch();
-
-final List<Uint8List> _localChunks = [];
-  final List<_AudioChunk> _remoteChunks = [];
+  // Both audio sources are stored continuously.
+  // No Dart arrival timestamps are used.
+  final List<Uint8List> _localChunks = [];
+  final List<Uint8List> _remoteChunks = [];
 
   bool _recording = false;
   String? _filePath;
@@ -47,180 +45,249 @@ final List<Uint8List> _localChunks = [];
       '_',
     );
 
-    final safeRole = participantRole.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    final safeRole = participantRole.replaceAll(
+      RegExp(r'[^a-zA-Z0-9_-]'),
+      '_',
+    );
 
     final filename =
-        '${safeExperimentId}_SCT_${testNumber.toString().padLeft(2, '0')}_$safeRole.wav';
+        '${safeExperimentId}_SCT_'
+        '${testNumber.toString().padLeft(2, '0')}_'
+        '$safeRole.wav';
 
-    _filePath = '${recordingsDirectory.path}${Platform.pathSeparator}$filename';
+    _filePath =
+        '${recordingsDirectory.path}'
+        '${Platform.pathSeparator}$filename';
 
     _localChunks.clear();
     _remoteChunks.clear();
-
-    _clock
-      ..reset()
-      ..start();
 
     _recording = true;
 
     debugPrint('Recording started: $_filePath');
   }
 
+  // LOCAL AUDIO
+  // Append microphone samples in their original order.
   void addLocalAudio(Uint8List pcm) {
-  if (!_recording || pcm.isEmpty) return;
+    if (!_recording || pcm.isEmpty) return;
 
-  _localChunks.add(Uint8List.fromList(pcm));
-}
-
-void _appendLocalChunks(Int16List destination) {
-  var position = 0;
-
-  for (final chunk in _localChunks) {
-    final samples = ByteData.sublistView(chunk);
-    final sampleCount = chunk.length ~/ bytesPerSample;
-
-    for (var i = 0; i < sampleCount; i++) {
-      if (position >= destination.length) return;
-
-      destination[position] = samples.getInt16(
-        i * bytesPerSample,
-        Endian.little,
-      );
-
-      position++;
-    }
+    _localChunks.add(Uint8List.fromList(pcm));
   }
-}
 
+  // REMOTE AUDIO
+  // Append received samples in their received order.
+  // No timestamp-based reconstruction.
   void addRemoteAudio(Uint8List pcm) {
     if (!_recording || pcm.isEmpty) return;
 
-    _remoteChunks.add(
-      _AudioChunk(
-        timeMicroseconds: _clock.elapsedMicroseconds,
-        pcm: Uint8List.fromList(pcm),
-      ),
-    );
+    _remoteChunks.add(Uint8List.fromList(pcm));
   }
 
   Future<String?> stopRecording() async {
     if (!_recording) return null;
 
     _recording = false;
-    _clock.stop();
 
     final path = _filePath;
     if (path == null) return null;
 
-    final durationMicroseconds = _clock.elapsedMicroseconds;
+    // Calculate actual sample counts.
+    final localFrames = _countFrames(_localChunks);
+    final remoteFrames = _countFrames(_remoteChunks);
 
-    // Convert elapsed time into stereo sample frames.
-    final localFrames = _localChunks.fold<int>(
-  0,
-  (sum, chunk) => sum + chunk.length ~/ bytesPerSample,
-);
+    // Use the longer stream as the WAV duration.
+    // The shorter channel is padded with silence.
+    final totalFrames = max(
+      1,
+      max(localFrames, remoteFrames),
+    );
 
-final totalFrames = max(
-  1,
-  max(
-    localFrames,
-    (durationMicroseconds * sampleRate / 1000000).ceil(),
-  ),
-);
+    debugPrint('========== RECORDING STATS ==========');
+    debugPrint('Local frames: $localFrames');
+    debugPrint('Remote frames: $remoteFrames');
+    debugPrint('Total WAV frames: $totalFrames');
+
+    debugPrint(
+      'Local duration: '
+      '${(localFrames / sampleRate).toStringAsFixed(2)} s',
+    );
+
+    debugPrint(
+      'Remote duration: '
+      '${(remoteFrames / sampleRate).toStringAsFixed(2)} s',
+    );
+
+    debugPrint('=====================================');
 
     final left = Int16List(totalFrames);
     final right = Int16List(totalFrames);
 
-    _appendLocalChunks(left);
-      _mixChunksIntoChannel(_remoteChunks, right);    
+    // BOTH channels use the same continuous assembly method.
+    _appendChunks(_localChunks, left);
+    _appendChunks(_remoteChunks, right);
 
-    final output = Uint8List(44 + totalFrames * bytesPerFrame);
+    // 44-byte WAV header + stereo PCM data.
+    final output = Uint8List(
+      44 + totalFrames * bytesPerFrame,
+    );
+
     final header = ByteData.sublistView(output);
 
-    // WAV header.
+    // RIFF header.
     _writeAscii(output, 0, 'RIFF');
-    header.setUint32(4, output.length - 8, Endian.little);
+
+    header.setUint32(
+      4,
+      output.length - 8,
+      Endian.little,
+    );
 
     _writeAscii(output, 8, 'WAVE');
+
+    // Format chunk.
     _writeAscii(output, 12, 'fmt ');
 
-    header.setUint32(16, 16, Endian.little);
-    header.setUint16(20, 1, Endian.little);
-    header.setUint16(22, channelCount, Endian.little);
-    header.setUint32(24, sampleRate, Endian.little);
+    header.setUint32(
+      16,
+      16,
+      Endian.little,
+    );
 
-    header.setUint32(28, sampleRate * bytesPerFrame, Endian.little);
+    // PCM format.
+    header.setUint16(
+      20,
+      1,
+      Endian.little,
+    );
 
-    header.setUint16(32, bytesPerFrame, Endian.little);
+    // Stereo.
+    header.setUint16(
+      22,
+      channelCount,
+      Endian.little,
+    );
 
-    header.setUint16(34, 16, Endian.little);
+    header.setUint32(
+      24,
+      sampleRate,
+      Endian.little,
+    );
 
+    // Byte rate.
+    header.setUint32(
+      28,
+      sampleRate * bytesPerFrame,
+      Endian.little,
+    );
+
+    // Block alignment.
+    header.setUint16(
+      32,
+      bytesPerFrame,
+      Endian.little,
+    );
+
+    // Bits per sample.
+    header.setUint16(
+      34,
+      16,
+      Endian.little,
+    );
+
+    // Data chunk.
     _writeAscii(output, 36, 'data');
 
-    header.setUint32(40, totalFrames * bytesPerFrame, Endian.little);
+    header.setUint32(
+      40,
+      totalFrames * bytesPerFrame,
+      Endian.little,
+    );
 
-    // Interleave left and right PCM samples.
+    // Interleave left and right samples.
+    //
+    // LEFT  = local microphone
+    // RIGHT = remote participant
     for (var i = 0; i < totalFrames; i++) {
       final offset = 44 + i * bytesPerFrame;
 
-      header.setInt16(offset, left[i], Endian.little);
+      header.setInt16(
+        offset,
+        left[i],
+        Endian.little,
+      );
 
-      header.setInt16(offset + 2, right[i], Endian.little);
+      header.setInt16(
+        offset + 2,
+        right[i],
+        Endian.little,
+      );
     }
 
+    // Save completed WAV.
     final file = File(path);
-    await file.writeAsBytes(output, flush: true);
+
+    await file.writeAsBytes(
+      output,
+      flush: true,
+    );
 
     _localChunks.clear();
     _remoteChunks.clear();
 
-    debugPrint('Recording saved: $path');
+    debugPrint('Stereo WAV saved successfully: $path');
 
     return path;
   }
 
-  void _mixChunksIntoChannel(List<_AudioChunk> chunks, Int16List destination) {
+  // Count complete PCM16 frames.
+  int _countFrames(List<Uint8List> chunks) {
+    var frames = 0;
+
     for (final chunk in chunks) {
-      final samples = ByteData.sublistView(chunk.pcm);
+      frames += chunk.length ~/ bytesPerSample;
+    }
 
-      final sampleCount = chunk.pcm.length ~/ bytesPerSample;
+    return frames;
+  }
 
-      // The timestamp marks when the chunk reached Dart.
-      // Approximate its start by subtracting its audio duration.
-      final chunkDurationMicroseconds = sampleCount * 1000000 / sampleRate;
+  // Append PCM chunks continuously to a destination channel.
+  //
+  // This method is used for BOTH local and remote audio.
+  void _appendChunks(
+    List<Uint8List> chunks,
+    Int16List destination,
+  ) {
+    var position = 0;
 
-      final startMicroseconds =
-          chunk.timeMicroseconds - chunkDurationMicroseconds;
+    for (final chunk in chunks) {
+      final samples = ByteData.sublistView(chunk);
 
-      final startFrame = max(
-        0,
-        (startMicroseconds * sampleRate / 1000000).round(),
-      );
+      final sampleCount =
+          chunk.length ~/ bytesPerSample;
 
       for (var i = 0; i < sampleCount; i++) {
-        final position = startFrame + i;
+        if (position >= destination.length) {
+          return;
+        }
 
-        if (position >= destination.length) break;
+        destination[position] = samples.getInt16(
+          i * bytesPerSample,
+          Endian.little,
+        );
 
-        final sample = samples.getInt16(i * bytesPerSample, Endian.little);
-
-        final mixed = destination[position] + sample;
-
-        destination[position] = mixed.clamp(-32768, 32767).toInt();
+        position++;
       }
     }
   }
 
-  void _writeAscii(Uint8List output, int offset, String value) {
+  void _writeAscii(
+    Uint8List output,
+    int offset,
+    String value,
+  ) {
     for (var i = 0; i < value.length; i++) {
       output[offset + i] = value.codeUnitAt(i);
     }
   }
-}
-
-class _AudioChunk {
-  final int timeMicroseconds;
-  final Uint8List pcm;
-
-  _AudioChunk({required this.timeMicroseconds, required this.pcm});
 }
