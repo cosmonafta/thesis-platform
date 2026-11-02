@@ -11,6 +11,13 @@ class CsvReportService {
     'experiment_id',
     'experiment_name',
     'participant_role',
+    'age',
+    'gender',
+    'native_language',
+    'german_proficiency',
+    'hearing_difficulties',
+    'previous_test_experience',
+    'headphone_type',
     'sct_number',
     'scenario_id',
     'recording_filename',
@@ -33,6 +40,7 @@ class CsvReportService {
     required ExperimentConfig experiment,
     required Map<int, EvaluationResult> results,
     required String participantRole,
+    Map<String, String> participantInfo = const {},
   }) async {
     if (results.isEmpty) {
       throw StateError('No evaluation results available.');
@@ -53,6 +61,13 @@ class CsvReportService {
         experiment.id,
         experiment.name,
         participantRole,
+        participantInfo['age'] ?? '',
+        participantInfo['gender'] ?? '',
+        participantInfo['native_language'] ?? '',
+        participantInfo['german_proficiency'] ?? '',
+        participantInfo['hearing_difficulties'] ?? '',
+        participantInfo['previous_test_experience'] ?? '',
+        participantInfo['headphone_type'] ?? '',
         index + 1,
         test.scenarioId,
         recordingFilename,
@@ -61,14 +76,14 @@ class CsvReportService {
         condition.echoEnabled,
         condition.echoEnabled ? condition.echoDelayMs : '',
         condition.echoEnabled ? condition.echoGain : '',
-        rating.overallQuality,
-        rating.noise,
-        rating.continuity,
-        rating.coloration,
-        rating.loudness,
-        rating.ownVoiceInfluence,
-        rating.ownVoiceImpairment,
-        rating.interaction,
+        rating.overallQuality.round(),
+        rating.noise.round(),
+        rating.continuity.round(),
+        rating.coloration.round(),
+        rating.loudness.round(),
+        rating.ownVoiceInfluence.round(),
+        rating.ownVoiceImpairment.round(),
+        rating.interaction.round(),
       ]);
     }
 
@@ -78,7 +93,11 @@ class CsvReportService {
     await folder.create(recursive: true);
     final safeId = experiment.id.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
     final path = '${folder.path}${Platform.pathSeparator}${safeId}_Results_$participantRole.csv';
-    await File(path).writeAsString('\uFEFF$csv\r\n', flush: true);
+    final temp = File('$path.tmp');
+    await temp.writeAsString('\uFEFF$csv\r\n', flush: true);
+    // Replace only after the new complete CSV has been flushed.
+    // On Android/Linux rename replaces the previous checkpoint atomically.
+    await temp.rename(path);
     return path;
   }
 

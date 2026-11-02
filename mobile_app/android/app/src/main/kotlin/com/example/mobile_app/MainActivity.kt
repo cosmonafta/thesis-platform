@@ -6,6 +6,9 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioDeviceInfo
+import android.media.AudioDeviceCallback
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import android.media.AudioRecord
 import android.media.AudioTrack
@@ -17,6 +20,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import java.util.Locale
+import java.util.ArrayDeque
 import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
@@ -39,6 +43,70 @@ class MainActivity : FlutterActivity() {
     // ============================================================
 
     private var audioTrack: AudioTrack? = null
+
+    // One playback writer; both network streams are mixed into its PCM frames.
+    private val mixerLock = Object()
+    private val remoteQueue = ArrayDeque<ByteArray>()
+    private val echoQueue = ArrayDeque<ByteArray>()
+    @Volatile private var mixerRunning = false
+    private var mixerThread: Thread? = null
+    private val frameBytes = 960 // 10 ms, 48 kHz, PCM16 mono
+    private val maxQueuedFrames = 30 // Cap queue growth at ~300 ms
+
+    private fun enqueuePcm(input: ByteArray, echo: Boolean) {
+        synchronized(mixerLock) {
+            val queue = if (echo) echoQueue else remoteQueue
+            var offset = 0
+            while (offset + 1 < input.size) {
+                val frame = ByteArray(frameBytes)
+                val count = minOf(frameBytes, input.size - offset)
+                val evenCount = count - count % 2
+                System.arraycopy(input, offset, frame, 0, evenCount)
+                if (queue.size >= maxQueuedFrames) queue.removeFirst()
+                queue.addLast(frame)
+                offset += evenCount
+            }
+        }
+    }
+
+    private fun mixFrames(remote: ByteArray?, echo: ByteArray?): ByteArray {
+        val mixed = ByteArray(frameBytes)
+        for (i in 0 until frameBytes step 2) {
+            val a = if (remote == null) 0 else
+                ((remote[i].toInt() and 0xff) or (remote[i + 1].toInt() shl 8)).toShort().toInt()
+            val b = if (echo == null) 0 else
+                ((echo[i].toInt() and 0xff) or (echo[i + 1].toInt() shl 8)).toShort().toInt()
+            val sum = (a + b).coerceIn(-32768, 32767)
+            mixed[i] = sum.toByte()
+            mixed[i + 1] = (sum shr 8).toByte()
+        }
+        return mixed
+    }
+
+    private fun startMixer() {
+        mixerRunning = true
+        mixerThread = thread(start = true, name = "NativeAudioMixer") {
+            val silence = ByteArray(frameBytes)
+            while (mixerRunning) {
+                val frames = synchronized(mixerLock) {
+                    Pair(
+                        if (remoteQueue.isEmpty()) null else remoteQueue.removeFirst(),
+                        if (echoQueue.isEmpty()) null else echoQueue.removeFirst()
+                    )
+                }
+                val pcm = if (frames.first == null && frames.second == null) silence
+                          else mixFrames(frames.first, frames.second)
+                // Blocking write is on this worker, never Flutter's UI thread.
+                val track = audioTrack ?: break
+                val written = track.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+                if (written < 0) {
+                    Log.w("AudioPlayback", "Mixer AudioTrack write error: $written")
+                    break
+                }
+            }
+        }
+    }
+
     private var audioRecord: AudioRecord? = null
 
     // Acoustic Echo Canceler
@@ -195,11 +263,7 @@ MethodChannel(
 
                     if (audioData != null) {
 
-                        audioTrack?.write(
-                            audioData,
-                            0,
-                            audioData.size
-                        )
+                        enqueuePcm(audioData, echo = false)
 
                         result.success(null)
 
@@ -210,6 +274,16 @@ MethodChannel(
                             "Audio data was null",
                             null
                         )
+                    }
+                }
+
+                "playEcho" -> {
+                    val audioData = call.arguments as? ByteArray
+                    if (audioData != null) {
+                        enqueuePcm(audioData, echo = true)
+                        result.success(null)
+                    } else {
+                        result.error("INVALID_AUDIO", "Echo audio was null", null)
                     }
                 }
 
@@ -623,42 +697,102 @@ MethodChannel(
     }
 
     // ============================================================
-    // LOUDSPEAKER ROUTING
+    // AUTOMATIC HEADPHONE / SPEAKER ROUTING
     // ============================================================
 
-    private fun enableLoudspeaker() {
-        val audioManager =
-            getSystemService(AUDIO_SERVICE) as AudioManager
+    private var routeCallback: AudioDeviceCallback? = null
+    private var selectedPlaybackDeviceId: Int? = null
 
-        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+    private fun watchAudioDevices() {
+        if (routeCallback != null) return
+        val manager = getSystemService(AUDIO_SERVICE) as AudioManager
+        routeCallback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+                enableLoudspeaker()
+            }
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+                enableLoudspeaker()
+            }
+        }
+        manager.registerAudioDeviceCallback(routeCallback, Handler(Looper.getMainLooper()))
+    }
+
+    private fun stopWatchingAudioDevices() {
+        val manager = getSystemService(AUDIO_SERVICE) as AudioManager
+        routeCallback?.let { manager.unregisterAudioDeviceCallback(it) }
+        routeCallback = null
+    }
+
+    // Kept the original function name to avoid touching capture/playback callers.
+    // Headphones are preferred, but never required.
+    // Explicitly bind OUR AudioTrack to the selected physical output.
+    private fun enableLoudspeaker() {
+        val manager = getSystemService(AUDIO_SERVICE) as AudioManager
+        manager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+        val outputs = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        fun priority(device: AudioDeviceInfo): Int = when (device.type) {
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_DEVICE -> 0
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> 1
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> 2
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> 10
+            else -> 100
+        }
+        val target = outputs.filter {
+            priority(it) < 100 || (Build.VERSION.SDK_INT >= 33 &&
+                it.type == AudioDeviceInfo.TYPE_BLE_HEADSET)
+        }.minByOrNull {
+            if (Build.VERSION.SDK_INT >= 33 && it.type == AudioDeviceInfo.TYPE_BLE_HEADSET) 3
+            else priority(it)
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val speaker = audioManager.availableCommunicationDevices
-                .firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            // Communication routing can differ from the actual AudioTrack route.
+            // Set it for compatible devices, then also bind the playback track.
+            val communicationTarget = manager.availableCommunicationDevices.firstOrNull {
+                it.id == target?.id
+            }
+            try {
+                if (communicationTarget != null) {
+                    manager.setCommunicationDevice(communicationTarget)
+                } else if (target?.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                    manager.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }?.let { manager.setCommunicationDevice(it) }
+                } else {
+                    manager.clearCommunicationDevice()
                 }
-
-            if (speaker != null) {
-                val selected = audioManager.setCommunicationDevice(speaker)
-                Log.i(
-                    "AudioRouting",
-                    "Built-in speaker selected: $selected"
-                )
-            } else {
-                Log.w(
-                    "AudioRouting",
-                    "Built-in speaker unavailable for communication routing"
-                )
+            } catch (error: Exception) {
+                Log.w("AudioRouting", "Communication route selection failed: $error")
             }
         } else {
             @Suppress("DEPRECATION")
-            audioManager.isSpeakerphoneOn = true
-
-            Log.i(
-                "AudioRouting",
-                "Legacy speakerphone routing enabled"
-            )
+            manager.isSpeakerphoneOn = target == null ||
+                target.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            if (target?.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+                try {
+                    @Suppress("DEPRECATION")
+                    manager.startBluetoothSco()
+                } catch (error: Exception) {
+                    Log.w("AudioRouting", "Bluetooth SCO setup failed: $error")
+                }
+            }
         }
+
+        val track = audioTrack
+        if (track != null) {
+            try {
+                val applied = track.setPreferredDevice(target)
+                selectedPlaybackDeviceId = if (applied) target?.id else null
+                Log.i("AudioRouting", "AudioTrack preferred output: type=${target?.type}, id=${target?.id}, applied=$applied, routed=${track.routedDevice?.type}")
+            } catch (error: Exception) {
+                Log.w("AudioRouting", "AudioTrack output selection failed: $error")
+            }
+        }
+        Log.i("AudioRouting", "Detected playback output: type=${target?.type}, id=${target?.id}")
     }
 
     // ============================================================
@@ -668,6 +802,7 @@ MethodChannel(
     private fun initializeAudioTrack() {
         // Apply routing on every initialize request, even if the
         // AudioTrack already exists.
+        watchAudioDevices()
         enableLoudspeaker()
 
         if (audioTrack != null) {
@@ -717,6 +852,7 @@ MethodChannel(
         )
 
         audioTrack?.play()
+        startMixer()
 
         // Some Android devices re-evaluate the route when playback begins.
         enableLoudspeaker()
@@ -732,6 +868,18 @@ MethodChannel(
     // ============================================================
 
     private fun stopAudioTrack() {
+        stopWatchingAudioDevices()
+        mixerRunning = false
+        // Stop unblocks any pending blocking write before joining the worker.
+        try { audioTrack?.pause() } catch (_: Exception) {}
+        try { audioTrack?.flush() } catch (_: Exception) {}
+        try { audioTrack?.stop() } catch (_: Exception) {}
+        try { mixerThread?.join(500) } catch (_: InterruptedException) {}
+        mixerThread = null
+        synchronized(mixerLock) {
+            remoteQueue.clear()
+            echoQueue.clear()
+        }
 
         try {
 
