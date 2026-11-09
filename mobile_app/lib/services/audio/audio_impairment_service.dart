@@ -14,8 +14,7 @@ class AudioImpairmentService {
   final List<Timer> _pendingTimers = [];
 
   // Previous samples for the echo effect.
-  Int16List _echoHistory = Int16List(0);
-  int _echoPosition = 0;
+  
 
   int packetsProcessed = 0;
   int packetsDropped = 0;
@@ -44,11 +43,7 @@ class AudioImpairmentService {
 
     _condition = condition;
 
-    final echoSamples =
-        (48000 * condition.echoDelayMs / 1000).round();
-
-    _echoHistory = Int16List(echoSamples);
-    _echoPosition = 0;
+    
 
     packetsProcessed = 0;
     packetsDropped = 0;
@@ -73,9 +68,7 @@ class AudioImpairmentService {
     }
 
     // 2. Echo processing.
-    final output = _condition.echoEnabled
-        ? _addEcho(pcm)
-        : Uint8List.fromList(pcm);
+    final output = Uint8List.fromList(pcm);
 
     // 3. Additional transmission delay.
     if (_condition.delayMs == 0) {
@@ -103,42 +96,7 @@ class AudioImpairmentService {
     _pendingTimers.add(timer);
   }
 
-  Uint8List _addEcho(Uint8List input) {
-    final output = Uint8List(input.length);
-    final source = ByteData.sublistView(input);
-    final destination = ByteData.sublistView(output);
 
-    final sampleCount = input.length ~/ 2;
-
-    for (var i = 0; i < sampleCount; i++) {
-      final current = source.getInt16(
-        i * 2,
-        Endian.little,
-      );
-
-      final delayed = _echoHistory[_echoPosition];
-
-      final mixed = (
-        current + delayed * _condition.echoGain
-      ).round().clamp(-32768, 32767).toInt();
-
-      destination.setInt16(
-        i * 2,
-        mixed,
-        Endian.little,
-      );
-
-      _echoHistory[_echoPosition] = current;
-
-      _echoPosition++;
-
-      if (_echoPosition >= _echoHistory.length) {
-        _echoPosition = 0;
-      }
-    }
-
-    return output;
-  }
 
   void stop() {
     _active = false;
